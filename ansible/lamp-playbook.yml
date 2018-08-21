@@ -1,0 +1,123 @@
+---
+- hosts: all
+  gather_facts: False
+  vars:
+    site_name: "{{ site_name }}"
+    site_domain: "{{ site_domain }}"
+    mysql_root_pass: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+    drupal_db_pass: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+    drupal_db_user:  "{{site_name}}user"
+
+  tasks:
+    - name: Run apt update
+      apt: update_cache=yes
+
+    - name: PHP | Install Ondrej PHP PPA
+      apt_repository: repo='ppa:ondrej/php' update_cache=yes
+
+    - name: PHP | install php packages
+      apt: pkg={{ item }} state=present
+      with_items:
+        - php7.1-fpm
+        - php7.1-cli
+        - php7.1-common
+        - php7.1-curl
+        - php7.1-json
+        - php7.1-gd
+        - php7.1-mcrypt
+        - php7.1-odbc
+        - php7.1-mbstring
+        - php7.1-mysql
+        - php7.1-xmlrpc
+        - php7.1-opcache
+        - php7.1-intl
+        - php7.1-bz2
+        - php7.1-xml
+
+    - stat: path=/usr/local/bin/composer
+      register: composer_folder
+    
+    - name: PHP | Install Composer
+      shell: curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer creates=/usr/local/bin/composer
+      when: composer_folder.stat.isdir is not defined
+
+    - name: MySQL | Install MySQL
+      apt: pkg={{ item }} state=present
+      with_items:
+        - mysql-common
+        - mysql-server
+        - python-mysqldb
+
+    - name: MySQL | Disallow root login remotely
+      ignore_errors: True
+      command: 'mysql -NBe "{{ item }}"'
+      with_items:
+        - DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')
+    
+    - name: MySQL | Create Drupal database
+      ignore_errors: True
+      command: 'mysql -NBe "{{ item }}"'
+      with_items:
+        - CREATE DATABASE drupal_website
+        - "GRANT ALL PRIVILEGES ON drupal_website.* TO '{{drupal_db_user}}'@'localhost' IDENTIFIED BY '{{drupal_db_pass}}'"
+
+    - name: NginX | Install nginx
+      ignore_errors: True
+      apt: pkg={{ item }} state=present
+      with_items:
+          - nginx
+
+    - name: NginX | Create documentroot
+      file: path=/var/www/{{site_name}} state=directory
+
+    - name: NginX | Configuring vhost 
+      ignore_errors: True
+      template:
+          src: nginx/drupal.conf
+          dest: "/etc/nginx/sites-available/{{site_name}}.conf"
+          owner: root
+          group: root
+          mode: 0600
+      notify: restart nginx
+
+    - name: NginX | Clean up the config file
+      replace:
+          path: "/etc/nginx/sites-available/{{site_name}}.conf"
+          regexp: "%site_name%"
+          replace: "{{site_name}}"
+
+    - name: NginX | Clean up the config file
+      replace:
+         path: "/etc/nginx/sites-available/{{site_name}}.conf"
+         regexp: "%site_domain%"
+         replace: "{{site_domain}}"
+     
+    - name: NginX | Enable drupal site
+      file:
+        src: "/etc/nginx/sites-available/{{site_name}}.conf"
+        dest: "/etc/nginx/sites-enabled/{{site_name}}.conf"
+        state: link
+      notify: restart nginx
+
+    - name: Nginx | Disable the default site
+      file:
+        path: "/etc/nginx/sites-enabled/default"
+        state: absent
+      notify: restart nginx
+    
+    - name: Drupal | Clone drupal installation
+      git:
+          repo: "https://github.com/drupal/drupal.git"
+          version: "8.5.6"
+          dest: /var/www/{{site_name}}
+
+    - name: Drupal | Install dependencies
+      composer:
+          command: install
+          working_dir: /var/www/{{site_name}}
+
+  handlers:
+    - name: restart nginx
+      service:
+        name=nginx
+        state=restarted
